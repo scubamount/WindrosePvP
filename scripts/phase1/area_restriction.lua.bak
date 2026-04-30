@@ -1,0 +1,463 @@
+--- WindrosePvP Area Restriction Module
+--- Enforces arena boundaries during active duels.
+--- Teleports players back if they exceed the leash distance.
+---
+--- This module is defensive: all property access is wrapped in pcall,
+--- multiple property paths are tried, and failures are logged gracefully.
+
+local Config = require("scripts.config")
+local Utils = require("scripts.utils")
+local EventBus = require("scripts.event_bus")
+local PvPStateManager = require("scripts.phase1.pvp_state_manager")
+
+local M = {}
+
+-- ===========================================================================
+-- Constants
+-- ===========================================================================
+
+--- Property paths to try when reading player location.
+--- Ordered by likelihood of success based on UE4SS/UE5 patterns.
+M._LOCATION_PATHS = {
+    "RootComponent.RelativeLocation",
+    "RootComponent.WorldLocation",
+    "RootComponent.ComponentToWorld.TransformValue.Translation",
+}
+
+--- WindrosePlus global (may not be available).
+--- Provides teleportation API if present.
+local wp = nil
+if _G.wp ~= nil then
+    wp = _G.wp
+elseif _G.WindrosePlus ~= nil then
+    wp = _G.WindrosePlus
+end
+
+-- ===========================================================================
+-- Internal State
+-- ===========================================================================
+
+--- Current arena center (may be updated at runtime).
+M._arena_center = {
+    X = 0,
+    Y = 0,
+    Z = 0,
+}
+
+--- Current arena radius.
+M._arena_radius = 5000
+
+--- Time accumulator for arena checks.
+M._check_accumulator = 0.0
+
+--- Track players we've warned about leaving (prevent spam).
+--- Key: player address, Value: timestamp of last warning.
+M._warned_players = {}
+
+--- EventBus subscription IDs for cleanup
+M._subscriptions = {}
+
+--- Warning cooldown in seconds.
+M._WARNING_COOLDOWN = 3.0
+
+-- ===========================================================================
+-- Initialization / Lifecycle
+-- ===========================================================================
+
+--- Initialize the module: register EventBus listeners.
+--- Call once at mod load time.
+function M.init()
+    Utils.info("Area Restriction: initializing")
+
+    -- Initialize arena center from config
+    M.set_arena_center(
+        Config.ARENA_CENTER.X,
+        Config.ARENA_CENTER.Y,
+        Config.ARENA_CENTER.Z
+    )
+    M.set_arena_radius(Config.ARENA_RADIUS)
+
+    -- Register EventBus listeners
+    -- Store IDs for cleanup in destroy()
+    local id1 = EventBus.on("duel_created", M._on_duel_created)
+    if id1 then M._subscriptions[#M._subscriptions+1] = {name = "duel_created", id = id1} end
+
+    local id2 = EventBus.on("duel_ended", M._on_duel_ended)
+    if id2 then M._subscriptions[#M._subscriptions+1] = {name = "duel_ended", id = id2} end
+
+    Utils.info("Area Restriction: initialized (arena center=" ..
+        M._arena_center.X .. "," .. M._arena_center.Y .. "," .. M._arena_center.Z ..
+        ", radius=" .. M._arena_radius .. ")")
+end
+
+--- Clean up module state.
+--- Called when the mod is unloaded.
+function M.destroy()
+    Utils.info("Area Restriction: shutting down")
+
+    -- Unsubsribe from EventBus using stored IDs
+    for _, sub in ipairs(M._subscriptions) do
+        EventBus.off(sub.name, sub.id)
+        Utils.info("  Unsubscribed: " .. sub.name)
+    end
+    M._subscriptions = {}
+
+    M._warned_players = {}
+    M._check_accumulator = 0.0
+    M._initialized = false
+    Utils.info("Area Restriction destroyed")
+end
+
+-- ===========================================================================
+-- Teleport Helper
+-- ===========================================================================
+-- Teleport a player to the arena center using WindrosePlus API.
+-- @param player userdata The player UObject to teleport
+-- @param center table {X, Y, Z} Arena center coordinates
+-- @return boolean True if teleport succeeded
+function M._teleport_to_arena(player, center)
+    if not player or not player:IsValid() then
+        return false
+    end
+
+    if wp and wp.teleport_player then
+        local ok = pcall(function()
+            wp.teleport_player(Utils.player_id(player), center.X, center.Y, center.Z)
+        end)
+        if ok then
+            Utils.info("Area Restriction: teleported player to arena center")
+            return true
+        else
+            Utils.warn("Area Restriction: wp.teleport_player failed: " .. tostring(err))
+        end
+    end
+
+    -- Fallback: try writing location property directly
+    Utils.warn("Area Restriction: WindrosePlus API unavailable, attempting direct teleport")
+    
+    local location_written = Utils.safe_write(
+        player,
+        "RootComponent.RelativeLocation",
+        center
+    )
+    
+    if location_written then
+        Utils.info("Area Restriction: wrote player location directly")
+        return true
+    else
+        Utils.warn("Area Restriction: could not teleport player, sending warning")
+    end
+
+    -- Try to send a warning message
+    local player_name = Utils.player_id(player)
+    EventBus.emit("system_message", {
+        recipient = player_name,
+        message = "[PvP] You have left the arena! Return to the duel area.",
+    })
+
+    return false
+end
+
+-- ===========================================================================
+-- Player Location Reading
+-- ===========================================================================
+-- Warning System
+-- ===========================================================================
+
+--- Send a warning message to a player about leaving the arena.
+--- Respects cooldown to prevent spam.
+--- @param player userdata The player to warn
+--- @return boolean True if warning was sent
+function M._warn_player(player)
+    if not player then return false end
+
+    local player_addr = Utils.obj_address(player)
+    if not player_addr then return false end
+
+    -- Check cooldown
+    local now = os.time()
+    local last_warning = M._warned_players[player_addr]
+    if last_warning and (now - last_warning) < M._WARNING_COOLDOWN then
+        return false  -- Still in cooldown
+    end
+
+    -- Update last warning time
+    M._warned_players[player_addr] = now
+
+    -- Send warning via EventBus
+    local player_name = Utils.player_id(player)
+    EventBus.emit("system_message", {
+        recipient = "player",  -- Send to specific player
+        target = player,
+        message = "[PvP] You are leaving the arena! Return to the duel area.",
+    })
+
+    Utils.info("Area Restriction: warning sent to " .. player_name)
+
+    return true
+end
+
+-- ===========================================================================
+-- Main Tick Logic
+-- ===========================================================================
+
+--- Main tick function: check all dueling players' positions.
+--- Called every frame/tick from the game loop.
+--- @param dt number Delta time since last tick (seconds)
+function M.on_tick(dt)
+    -- Accumulate time for interval checks
+    M._check_accumulator = M._check_accumulator + dt
+
+    -- Check at configured interval
+    if M._check_accumulator < Config.ARENA_CHECK_INTERVAL then
+        return
+    end
+
+    M._check_accumulator = 0.0
+
+    -- Skip if enforcement is disabled
+    if not Config.ARENA_ENFORCE_BOUNDARY then
+        return
+    end
+
+    -- Get all active duels
+    local active_duels = PvPStateManager.get_active_duels()
+
+    for _, duel in ipairs(active_duels) do
+        if duel.status ~= "active" then
+            -- Only enforce during active duels
+            goto continue
+        end
+
+        -- Check player A
+        if duel.player_a then
+            M._check_player(duel.player_a, duel.id)
+        end
+
+        -- Check player B
+        if duel.player_b then
+            M._check_player(duel.player_b, duel.id)
+        end
+
+        ::continue::
+    end
+end
+
+--- Check a single player's position against arena bounds.
+--- @param player userdata The player to check
+--- @param duel_id number The duel they're in (for logging)
+function M._check_player(player, duel_id)
+    if not player then return end
+
+    -- Read player location
+    local location = M._read_player_location(player)
+    if not location then
+        Utils.debug("Area Restriction: could not read location for player in duel " .. duel_id)
+        return
+    end
+
+    -- Check leash distance (teleport zone)
+    if M.is_exceeding_leash(location) then
+        local player_name = Utils.player_id(player)
+        Utils.warn("Area Restriction: player " .. player_name ..
+            " exceeded leash distance (" .. Utils.distance_3d(location, M._arena_center) ..
+            "), teleporting back")
+
+        -- Emit event for other modules to handle
+        EventBus.emit("player_left_arena", {
+            duel_id = duel_id,
+            player = player,
+            player_name = player_name,
+            location = location,
+            arena_center = M._arena_center,
+        })
+
+        -- Teleport back
+        M._teleport_to_arena(player)
+
+        return
+    end
+
+    -- Check warning zone (inside leash but outside arena)
+    if not M.is_in_arena(location) then
+        -- Player is between ARENA_RADIUS and ARENA_LEASH_DISTANCE
+        -- Send warning but don't teleport yet
+        M._warn_player(player)
+    end
+end
+
+-- ===========================================================================
+-- Public API: Arena Management
+-- ===========================================================================
+
+--- Get current arena information.
+--- @return table {center: {X, Y, Z}, radius: number}
+function M.get_arena_info()
+    return {
+        center = {
+            X = M._arena_center.X,
+            Y = M._arena_center.Y,
+            Z = M._arena_center.Z,
+        },
+        radius = M._arena_radius,
+    }
+end
+
+--- Set the arena center coordinates.
+--- @param x number X coordinate
+--- @param y number Y coordinate
+--- @param z number Z coordinate
+--- @return boolean Always returns true (for API consistency)
+function M.set_arena_center(x, y, z)
+    M._arena_center.X = x or 0
+    M._arena_center.Y = y or 0
+    M._arena_center.Z = z or 0
+
+    Utils.info("Area Restriction: arena center set to (" ..
+        M._arena_center.X .. "," .. M._arena_center.Y .. "," .. M._arena_center.Z .. ")")
+
+    return true
+end
+
+--- Set the arena radius.
+--- @param radius number New radius (in UE units)
+--- @return boolean True if value is valid (> 0)
+function M.set_arena_radius(radius)
+    if type(radius) ~= "number" or radius <= 0 then
+        Utils.warn("Area Restriction: invalid radius value: " .. tostring(radius))
+        return false
+    end
+
+    M._arena_radius = radius
+
+    Utils.info("Area Restriction: arena radius set to " .. M._arena_radius)
+
+    return true
+end
+
+-- ===========================================================================
+-- Self-Tests
+-- ===========================================================================
+
+local function register_self_tests()
+    -- Test: is_in_arena with center point returns true
+    Utils.register_test("area_restriction_is_in_arena_center", function()
+        local center = {X = 0, Y = 0, Z = 0}
+        local result = M.is_in_arena(center)
+        return result == true
+    end)
+
+    -- Test: is_in_arena with point outside radius returns false
+    Utils.register_test("area_restriction_is_in_arena_outside", function()
+        local far_point = {X = 10000, Y = 0, Z = 0}  -- 10000 > radius (5000)
+        local result = M.is_in_arena(far_point)
+        return result == false
+    end)
+
+    -- Test: is_in_arena on boundary returns true (inclusive)
+    Utils.register_test("area_restriction_is_in_arena_boundary", function()
+        -- Exactly at radius distance
+        local boundary_point = {X = 5000, Y = 0, Z = 0}  -- distance = 5000
+        local result = M.is_in_arena(boundary_point)
+        return result == true
+    end)
+
+    -- Test: is_in_arena with nil returns false
+    Utils.register_test("area_restriction_is_in_arena_nil", function()
+        return M.is_in_arena(nil) == false
+    end)
+
+    -- Test: is_exceeding_leash with nil returns true
+    Utils.register_test("area_restriction_is_exceeding_leash_nil", function()
+        return M.is_exceeding_leash(nil) == true
+    end)
+
+    -- Test: is_exceeding_leash with center returns false
+    Utils.register_test("area_restriction_is_exceeding_leash_center", function()
+        local center = {X = 0, Y = 0, Z = 0}
+        return M.is_exceeding_leash(center) == false
+    end)
+
+    -- Test: is_exceeding_leash beyond leash distance returns true
+    Utils.register_test("area_restriction_is_exceeding_leash_far", function()
+        local far = {X = 6000, Y = 0, Z = 0}  -- 6000 > leash (5500)
+        return M.is_exceeding_leash(far) == true
+    end)
+
+    -- Test: get_arena_info returns correct structure
+    Utils.register_test("area_restriction_get_arena_info", function()
+        local info = M.get_arena_info()
+        return type(info) == "table"
+            and type(info.center) == "table"
+            and type(info.radius) == "number"
+    end)
+
+    -- Test: set_arena_center updates values
+    Utils.register_test("area_restriction_set_arena_center", function()
+        M.set_arena_center(100, 200, 300)
+        local info = M.get_arena_info()
+        return info.center.X == 100
+            and info.center.Y == 200
+            and info.center.Z == 300
+    end)
+
+    -- Test: set_arena_radius updates value
+    Utils.register_test("area_restriction_set_arena_radius", function()
+        M.set_arena_radius(10000)
+        local info = M.get_arena_info()
+        return info.radius == 10000
+    end)
+
+    -- Test: set_arena_radius rejects invalid values
+    Utils.register_test("area_restriction_set_arena_radius_invalid", function()
+        local result = M.set_arena_radius(-1)
+        return result == false
+    end)
+
+    -- Test: on_tick doesn't crash with nil dt
+    Utils.register_test("area_restriction_on_tick_nil", function()
+        local ok, err = pcall(function()
+            M.on_tick(nil)
+        end)
+        return ok
+    end)
+
+    -- Test: on_tick doesn't crash with zero dt
+    Utils.register_test("area_restriction_on_tick_zero", function()
+        local ok, err = pcall(function()
+            M.on_tick(0)
+        end)
+        return ok
+    end)
+
+    -- Test: distance_3d calculation (uses Utils internally)
+    Utils.register_test("area_restriction_distance_3d_known", function()
+        local a = {X = 0, Y = 0, Z = 0}
+        local b = {X = 3000, Y = 4000, Z = 0}
+        local dist = Utils.distance_3d(a, b)
+        -- 3-4-5 triangle scaled by 1000 = 5000
+        return math.abs(dist - 5000) < 1.0
+    end)
+
+    -- Test: init can be called multiple times safely
+    Utils.register_test("area_restriction_init_multiple", function()
+        local ok, err = pcall(function()
+            M.init()  -- Second call
+        end)
+        return ok
+    end)
+
+    -- Test: get_arena_info after init returns config values
+    Utils.register_test("area_restriction_info_after_init", function()
+        local info = M.get_arena_info()
+        return info.center.X == Config.ARENA_CENTER.X
+            and info.radius == Config.ARENA_RADIUS
+    end)
+
+    Utils.info("Area Restriction self-tests registered")
+end
+
+-- Register tests
+register_self_tests()
+
+return M

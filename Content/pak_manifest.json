@@ -1,0 +1,38 @@
+{
+    "name": "WindrosePvP_Client",
+    "version": "0.1.0",
+    "author": "WindrosePvP Community",
+    "description": "Client-side UI mod for WindrosePvP server mod — Duel invitations, health bars, scoreboard, arena indicators",
+    "game_ids": [2475, 3992],
+    "modio_tags": ["PvP", "UI", "HUD"],
+    "pak_contents": {
+        "Widgets/": [
+            "WBP_DuelInvite.uasset",
+            "WBP_DuelInvite_C.uasset",
+            "WBP_PvPHealthBar.uasset",
+            "WBP_PvPHealthBar_C.uasset",
+            "WBP_PvPScoreboard.uasset",
+            "WBP_PvPScoreboard_C.uasset",
+            "WBP_ArenaIndicator.uasset",
+            "WBP_ArenaIndicator_C.uasset"
+        ],
+        "Textures/": [
+            "T_PvP_Sword_Icon.uasset",
+            "T_PvP_Shield_Icon.uasset",
+            "T_PvP_Arena_Boundary.uasset"
+        ],
+        "Blueprints/": [
+            "BP_PvP_Helper.uasset"
+        ]
+    },
+    "installation": {
+        "method": "mod.io",
+        "fallback": "Copy .pak to Windrose/R5/Content/Paks/",
+        "note": "Must match server mod version (scripts/mod.json version)"
+    },
+    "dependencies": {
+        "server_mod": "WindrosePvP v0.1.0+ (scripts/)",
+        "note": "Client pak is useless without the server Lua mod"
+    },
+    "build_instructions": "See README.md for detailed build steps using UE5.6.1 Editor"
+}

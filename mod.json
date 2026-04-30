@@ -1,0 +1,36 @@
+{
+    "name": "WindrosePvP",
+    "version": "0.1.0",
+    "author": "WindrosePvP Community",
+    "description": "Opt-in PvP duel system for Windrose dedicated servers using shadow damage",
+    "entry_point": "scripts/init.lua",
+    "dependencies": [],
+    "phase_0_scripts": [
+        "scripts/phase0/p0_sdk_dump.lua",
+        "scripts/phase0/p0_property_discovery.lua",
+        "scripts/phase0/p0_health_write_test.lua",
+        "scripts/phase0/p0_melee_hook_test.lua",
+        "scripts/phase0/p0_gas_hook_test.lua",
+        "scripts/phase0/p0_replication_test.lua",
+        "scripts/phase0/p0_boarding_lifecycle.lua"
+    ],
+    "phase_1_scripts": [
+        "scripts/phase1/pvp_state_manager.lua",
+        "scripts/phase1/health_manager.lua",
+        "scripts/phase1/duel_request.lua",
+        "scripts/phase1/area_restriction.lua",
+        "scripts/phase1/damage_router.lua",
+        "scripts/phase1/main_phase1.lua"
+    ],
+    "_note": "Script arrays below are informational only; init.lua uses its own hardcoded Phase0Scripts table as the source of truth. To add/remove scripts, edit both init.lua and this file.",
+    "config": {
+        "arena_center_x": 0,
+        "arena_center_y": 0,
+        "arena_center_z": 0,
+        "arena_radius": 5000,
+        "duel_timeout": 600,
+        "challenge_timeout": 60,
+        "auto_revive": true,
+        "damage_messages": true
+    }
+}

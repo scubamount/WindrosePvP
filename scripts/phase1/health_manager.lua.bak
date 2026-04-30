@@ -1,0 +1,799 @@
+--- WindrosePvP Shadow Damage Health Manager
+--- Phase 1 module that handles direct health property manipulation for PvP damage.
+--- This module does NOT call any UFunctions — all damage is applied via direct
+--- property modification (shadow damage system).
+---
+--- Key responsibilities:
+--- 1. Read/write health properties on player characters
+--- 2. Detect GAS overwrites and re-apply health modifications
+--- 3. Handle death detection and auto-revive
+--- 4. Send damage feedback messages
+---
+--- @require Config - Module configuration (HEALTH_PROPERTY_PATH, etc.)
+--- @require Utils - Safe property access utilities
+--- @require EventBus - Internal pub/sub for events
+--- @require PvPStateManager - PvP duel state management
+
+local Config = require("scripts.config")
+local Utils = require("scripts.utils")
+local EventBus = require("scripts.event_bus")
+local PvPStateManager = require("scripts.phase1.pvp_state_manager")
+
+local M = {}
+
+-- ===========================================================================
+-- Private State
+-- ===========================================================================
+
+--- Current tick counter for timing health write verification
+M._current_tick = 0
+
+--- Pending health writes awaiting verification
+--- Format: { [addr_string] = { expected = number, tick_written = number, retries = number } }
+M._pending_writes = {}
+
+--- Queue of pending death events (delayed to confirm health stays at 0)
+--- Format: { { player = userdata, killer = userdata|nil, duel_id = string|nil, delay = number } }
+M._death_queue = {}
+
+--- Queue of pending auto-revive operations
+--- Format: { { player = userdata, revive_health = number, delay = number } }
+M._revive_queue = {}
+
+--- Player health cache for quick lookups
+--- Format: { [addr_string] = { player = userdata, last_known_health = number, last_known_max = number } }
+M._player_cache = {}
+
+--- Whether the module has been initialized
+M._initialized = false
+
+--- Subscription IDs for EventBus listeners (for cleanup)
+M._subscriptions = {}
+
+-- ===========================================================================
+-- Health Property Path Resolution
+-- ===========================================================================
+
+--- Get the effective property path for health reads/writes.
+--- Considers Config.HEALTH_PROPERTY_PATH and Config.HEALTH_IS_ATTRIBUTE_DATA.
+--- @return string|nil Property path, or nil if not configured
+function M._get_health_path()
+    if not Config.HEALTH_PROPERTY_PATH then
+        return nil
+    end
+
+    -- If health is stored as FGameplayAttributeData, append .CurrentValue
+    if Config.HEALTH_IS_ATTRIBUTE_DATA then
+        return Config.HEALTH_PROPERTY_PATH .. ".CurrentValue"
+    end
+
+    return Config.HEALTH_PROPERTY_PATH
+end
+
+--- Get the effective property path for max health reads.
+--- @return string|nil Property path, or nil if not configured
+function M._get_max_health_path()
+    if not Config.MAX_HEALTH_PROPERTY_NAME then
+        return nil
+    end
+
+    if Config.HEALTH_IS_ATTRIBUTE_DATA then
+        return Config.MAX_HEALTH_PROPERTY_NAME .. ".CurrentValue"
+    end
+
+    return Config.MAX_HEALTH_PROPERTY_NAME
+end
+
+-- ===========================================================================
+-- Player Tracking
+-- ===========================================================================
+
+--- Get or create cache entry for a player.
+--- @param player userdata Player UObject
+--- @return table|nil Cache entry, or nil if player invalid
+function M._get_cache_entry(player)
+    if not player or not player:IsValid() then
+        return nil
+    end
+
+    local addr = Utils.obj_address(player)
+    if not addr then
+        return nil
+    end
+
+    if not M._player_cache[addr] then
+        M._player_cache[addr] = {
+            player = player,
+            last_known_health = nil,
+            last_known_max = nil,
+        }
+    else
+        -- Update the player reference in case it changed
+        M._player_cache[addr].player = player
+    end
+
+    return M._player_cache[addr]
+end
+
+--- Find a player UObject by its address string.
+--- @param addr string Memory address string
+--- @return userdata|nil Player UObject, or nil if not found
+function M._get_player_by_addr(addr)
+    local entry = M._player_cache[addr]
+    if entry and entry.player and entry.player:IsValid() then
+        return entry.player
+    end
+    return nil
+end
+
+--- Update cached health values for all known players.
+--- Called periodically from OnTick.
+function M._update_player_cache()
+    -- Get all dueling players from PvPStateManager
+    local duels = PvPStateManager and PvPStateManager.get_active_duels and PvPStateManager.get_active_duels() or {}
+
+    for _, duel in ipairs(duels) do
+        -- Update player_a health cache (use correct field names: player_a, player_b)
+        if duel and duel.player_a and duel.player_a:IsValid() then
+            local addr_a = Utils.obj_address(duel.player_a)
+            if addr_a then
+                M._player_cache[addr_a] = { player = duel.player_a, last_known_health = M.get_health(duel.player_a) or 100 }
+            end
+        end
+
+        -- Update player_b health cache
+        if duel and duel.player_b and duel.player_b:IsValid() then
+            local addr_b = Utils.obj_address(duel.player_b)
+            if addr_b then
+                M._player_cache[addr_b] = { player = duel.player_b, last_known_health = M.get_health(duel.player_b) or 100 }
+            end
+        end
+    end
+        end
+
+        -- Update player_b health cache (use correct field name: player_b)
+        if duel and duel.player_b and duel.player_b:IsValid() then
+            local addr_b = Utils.obj_address(duel.player_b)
+            if addr_b then
+                M._player_cache[addr_b] = { player = duel.player_b, last_known_health = M.get_health(duel.player_b) or 100 }
+            end
+        end
+    end
+end
+
+-- ===========================================================================
+-- Public Health API
+-- ===========================================================================
+-- Public Health API
+-- ===========================================================================
+
+--- Get the current health of a player.
+--- @param player userdata|nil Player UObject
+--- @return number|nil Current health value, or nil if unreadable
+function M.get_health(player)
+    if not player then
+        return nil
+    end
+
+    local path = M._get_health_path()
+    if not path then
+        Utils.debug("get_health: HEALTH_PROPERTY_PATH not configured")
+        return nil
+    end
+
+    local health = Utils.safe_read(player, path)
+    if health == nil then
+        return nil
+    end
+
+    -- Ensure we return a number
+    if type(health) ~= "number" then
+        Utils.warn("get_health: health value is not a number: " .. type(health))
+        return nil
+    end
+
+    return health
+end
+
+--- Get the maximum health of a player.
+--- @param player userdata|nil Player UObject
+--- @return number|nil Max health value, or nil if unreadable
+function M.get_max_health(player)
+    if not player then
+        return nil
+    end
+
+    local path = M._get_max_health_path()
+    if not path then
+        -- Fall back to current health if max health path not configured
+        return M.get_health(player)
+    end
+
+    local max_health = Utils.safe_read(player, path)
+    if max_health == nil then
+        return nil
+    end
+
+    if type(max_health) ~= "number" then
+        Utils.warn("get_max_health: max health value is not a number: " .. type(max_health))
+        return nil
+    end
+
+    return max_health
+end
+
+--- Set the health of a player directly (no damage processing).
+--- @param player userdata|nil Player UObject
+--- @param value number New health value
+--- @return boolean Whether the write succeeded
+function M.set_health(player, value)
+    if not player then
+        return false
+    end
+
+    local path = M._get_health_path()
+    if not path then
+        Utils.warn("set_health: HEALTH_PROPERTY_PATH not configured")
+        return false
+    end
+
+    -- Clamp to valid range
+    local max_health = M.get_max_health(player) or 100
+    local clamped_value = Utils.clamp(value, 0, max_health)
+
+    local success = Utils.safe_write(player, path, clamped_value)
+    if success then
+        -- Update cache
+        local entry = M._get_cache_entry(player)
+        if entry then
+            entry.last_known_health = clamped_value
+        end
+    end
+
+    return success
+end
+
+--- Apply damage to a player (shadow damage system).
+--- This is the main entry point for PvP damage — it handles the complete
+--- damage pipeline: read, modify, write, verify, and event emission.
+---
+--- @param player userdata|nil Target player
+--- @param amount number Damage amount to apply
+--- @param source userdata|nil Source player (attacker)
+--- @return boolean, string|nil Success status, optional error message
+function M.apply_damage(player, amount, source)
+    -- Validate inputs
+    if not player then
+        return false, "player is nil"
+    end
+
+    if not player:IsValid() then
+        return false, "player is not valid"
+    end
+
+    if type(amount) ~= "number" or amount <= 0 then
+        return false, "invalid damage amount"
+    end
+
+    -- Cap damage per hit for safety
+    if amount > Config.MAX_DAMAGE_PER_HIT then
+        Utils.warn("Capping damage from " .. amount .. " to " .. Config.MAX_DAMAGE_PER_HIT)
+        amount = Config.MAX_DAMAGE_PER_HIT
+    end
+
+    -- Check if health property is configured
+    local path = M._get_health_path()
+    if not path then
+        return false, "health property not configured"
+    end
+
+    -- Read current health
+    local current_health = M.get_health(player)
+    if current_health == nil then
+        return false, "health read failed"
+    end
+
+    -- Compute new health
+    local max_health = M.get_max_health(player) or 100
+    local new_health = Utils.clamp(current_health - amount, 0, max_health)
+
+    -- Write new health
+    local write_success = Utils.safe_write(player, path, new_health)
+    if not write_success then
+        return false, "health write failed"
+    end
+
+    -- Track pending write for GAS overwrite detection
+    local addr = Utils.obj_address(player)
+    if addr then
+        M._pending_writes[addr] = {
+            expected = new_health,
+            tick_written = M._current_tick,
+            retries = 0,
+        }
+    end
+
+    -- Update cache
+    local entry = M._get_cache_entry(player)
+    if entry then
+        entry.last_known_health = new_health
+    end
+
+    -- Emit damage applied event
+    EventBus.emit("damage_applied", {
+        source = source,
+        target = player,
+        amount = amount,
+        remaining = new_health,
+    })
+
+    -- Send damage feedback message
+    if Config.DAMAGE_MESSAGES_ENABLED then
+        M._send_damage_message(source, player, amount, new_health)
+    end
+
+    -- Queue death if health reached zero
+    if new_health <= 0 then
+        local duel_id = nil
+        if PvPStateManager and PvPStateManager.get_duel then
+            local duel = PvPStateManager.get_duel(player)
+            if duel then
+                duel_id = duel.duel_id
+            end
+        end
+
+        table.insert(M._death_queue, {
+            player = player,
+            killer = source,
+            duel_id = duel_id,
+            delay = 0.5, -- Small delay to confirm death
+        })
+
+        Utils.info("Player health reached 0, queued death confirmation: " .. Utils.player_id(player))
+    end
+
+    return true
+end
+
+--- Heal a player by a specified amount.
+--- @param player userdata|nil Target player
+--- @param amount number Amount to heal
+--- @return boolean Whether the heal succeeded
+function M.heal_player(player, amount)
+    if not player or not player:IsValid() then
+        return false
+    end
+
+    if type(amount) ~= "number" or amount <= 0 then
+        return false
+    end
+
+    local current = M.get_health(player)
+    if current == nil then
+        return false
+    end
+
+    local max_health = M.get_max_health(player) or 100
+    local new_health = Utils.clamp(current + amount, 0, max_health)
+
+    return M.set_health(player, new_health)
+end
+
+--- Check if a player is dead (health <= 0 or invalid).
+--- @param player userdata|nil Player to check
+--- @return boolean True if dead or invalid
+function M.is_dead(player)
+    if not player then
+        return true
+    end
+
+    if not player:IsValid() then
+        return true
+    end
+
+    local health = M.get_health(player)
+    if health == nil then
+        -- If we can't read health, assume dead
+        return true
+    end
+
+    return health <= 0
+end
+
+-- ===========================================================================
+-- Damage Feedback
+-- ===========================================================================
+
+--- Send a damage feedback message to players.
+--- Uses wp.send_system_message if available, falls back to logging.
+--- @param source userdata|nil Attacker
+--- @param target userdata|nil Target
+--- @param damage number Damage amount
+--- @param remaining number Remaining health
+function M._send_damage_message(source, target, damage, remaining)
+    local source_name = source and Utils.player_id(source) or "Unknown"
+    local target_name = target and Utils.player_id(target) or "Unknown"
+
+    local message = Utils.format_template(Config.DAMAGE_MESSAGE_TEMPLATE, {
+        source = source_name,
+        target = target_name,
+        damage = string.format("%.1f", damage),
+        remaining = string.format("%.1f", remaining),
+    })
+
+    -- Try to use WindrosePlus system message function
+    local ok, wp = pcall(function()
+        return wp
+    end)
+
+    if ok and wp and wp.send_system_message then
+        local success, err = pcall(function()
+            wp.send_system_message(message)
+        end)
+        if not success then
+            Utils.debug("wp.send_system_message failed: " .. tostring(err))
+        end
+    else
+        -- Fall back to server log
+        Utils.info(message)
+    end
+end
+
+-- ===========================================================================
+-- OnTick Processing
+-- ===========================================================================
+
+--- Main tick handler — called every server tick.
+--- Handles:
+--- 1. Pending write verification (GAS overwrite detection)
+--- 2. Death queue processing
+--- 3. Auto-revive queue processing
+--- 4. Player cache updates
+---
+--- @param dt number Delta time in seconds
+function M.on_tick(dt)
+    if not M._initialized then
+        return
+    end
+
+    M._current_tick = M._current_tick + 1
+
+    -- Update player cache periodically (every 10 ticks)
+    if M._current_tick % 10 == 0 then
+        M._update_player_cache()
+    end
+
+    -- =========================================================================
+    -- 1. Check pending writes for GAS overwrite
+    -- =========================================================================
+    for addr, pending in pairs(M._pending_writes) do
+        -- Only check after configured delay
+        if M._current_tick - pending.tick_written >= Config.HEALTH_REAPPLY_CHECK_DELAY then
+            local player = M._get_player_by_addr(addr)
+            if not player or not player:IsValid() then
+                -- Player no longer valid, clear pending
+                M._pending_writes[addr] = nil
+                goto continue
+            end
+
+            local actual = M.get_health(player)
+            if actual and math.abs(actual - pending.expected) > 0.01 then
+                -- GAS overwrote our modification
+                Utils.warn(string.format("GAS overwrite detected! Expected %.2f, got %.2f", pending.expected, actual))
+                Config.GAS_OVERWRITE_DETECTED = true
+
+                EventBus.emit("gas_overwrite_detected", {
+                    player = player,
+                    expected = pending.expected,
+                    actual = actual,
+                })
+
+                if pending.retries < Config.HEALTH_REAPPLY_MAX_RETRIES then
+                    -- Re-apply the health value
+                    local reapply_success = M.set_health(player, pending.expected)
+                    if reapply_success then
+                        Utils.info("Re-applied health for " .. Utils.player_id(player) .. " (retry " .. (pending.retries + 1) .. ")")
+                        pending.retries = pending.retries + 1
+                        pending.tick_written = M._current_tick
+                    else
+                        Utils.warn("Failed to re-apply health for " .. Utils.player_id(player))
+                        M._pending_writes[addr] = nil
+                    end
+                else
+                    -- Give up — GAS is dominant
+                    Utils.warn("GAS dominant — cannot persist shadow damage for " .. Utils.player_id(player))
+                    M._pending_writes[addr] = nil
+
+                    -- Emit event for modules that might want to handle this
+                    EventBus.emit("gas_dominant", {
+                        player = player,
+                    })
+                end
+            else
+                -- Write stuck successfully, clear pending
+                M._pending_writes[addr] = nil
+            end
+        end
+        ::continue::
+    end
+
+    -- =========================================================================
+    -- 2. Process death queue
+    -- =========================================================================
+    for i = #M._death_queue, 1, -1 do
+        local death = M._death_queue[i]
+        death.delay = death.delay - dt
+
+        if death.delay <= 0 then
+            -- Confirm death by checking current health
+            local health = M.get_health(death.player)
+            if health and health <= 0 then
+                -- Emit player died event
+                EventBus.emit("player_died", {
+                    player = death.player,
+                    killer = death.killer,
+                    duel_id = death.duel_id,
+                })
+
+                Utils.info("Player died: " .. Utils.player_id(death.player))
+
+                -- Queue auto-revive if enabled
+                if Config.AUTO_REVIVE_LOSER then
+                    local max_health = M.get_max_health(death.player) or 100
+                    local revive_health = max_health * 0.5 -- 50% of max health
+
+                    table.insert(M._revive_queue, {
+                        player = death.player,
+                        revive_health = revive_health,
+                        delay = Config.AUTO_REVIVE_DELAY,
+                    })
+
+                    Utils.info("Queued auto-revive for " .. Utils.player_id(death.player) .. " in " .. Config.AUTO_REVIVE_DELAY .. "s")
+                end
+            else
+                -- Player recovered (healed or other system干预)
+                Utils.info("Death queue: player " .. Utils.player_id(death.player) .. " no longer at 0 health")
+            end
+
+            table.remove(M._death_queue, i)
+        end
+    end
+
+    -- =========================================================================
+    -- 3. Process auto-revive queue
+    -- =========================================================================
+    for i = #M._revive_queue, 1, -1 do
+        local revive = M._revive_queue[i]
+        revive.delay = revive.delay - dt
+
+        if revive.delay <= 0 then
+            -- Perform the revive
+            local success = M.set_health(revive.player, revive.revive_health)
+            if success then
+                Utils.info("Auto-revived " .. Utils.player_id(revive.player) .. " to " .. revive.revive_health .. " HP")
+
+                -- Emit revive event
+                EventBus.emit("player_revived", {
+                    player = revive.player,
+                    health = revive.revive_health,
+                })
+            else
+                Utils.warn("Failed to auto-revive " .. Utils.player_id(revive.player))
+            end
+
+            table.remove(M._revive_queue, i)
+        end
+    end
+end
+
+-- ===========================================================================
+-- Status & Debugging
+-- ===========================================================================
+
+--- Get current health manager status.
+--- Useful for RCON pvp_health command and debugging.
+--- @return table Status information
+function M.get_status()
+    local pending_count = 0
+    for _ in pairs(M._pending_writes) do
+        pending_count = pending_count + 1
+    end
+
+    local cached_players = 0
+    for _ in pairs(M._player_cache) do
+        cached_players = cached_players + 1
+    end
+
+    return {
+        initialized = M._initialized,
+        current_tick = M._current_tick,
+        pending_writes = pending_count,
+        death_queue_size = #M._death_queue,
+        revive_queue_size = #M._revive_queue,
+        cached_players = cached_players,
+        health_property_configured = M._get_health_path() ~= nil,
+        gas_overwrite_detected = Config.GAS_OVERWRITE_DETECTED,
+    }
+end
+
+--- Get detailed info about a specific player's health state.
+--- @param player userdata Player to query
+--- @return table|nil Detailed health info
+function M.get_player_health_info(player)
+    if not player or not player:IsValid() then
+        return nil
+    end
+
+    local current = M.get_health(player)
+    local max = M.get_max_health(player)
+
+    local addr = Utils.obj_address(player)
+    local cached = addr and M._player_cache[addr] or nil
+
+    return {
+        player_id = Utils.player_id(player),
+        current_health = current,
+        max_health = max,
+        is_dead = M.is_dead(player),
+        pending_write = addr and M._pending_writes[addr] or nil,
+        cached_health = cached and cached.last_known_health or nil,
+    }
+end
+
+-- ===========================================================================
+-- Initialization
+-- ===========================================================================
+
+--- Initialize the health manager.
+--- Registers EventBus listeners and sets up internal state.
+function M.init()
+    if M._initialized then
+        Utils.warn("HealthManager.init called but already initialized")
+        return
+    end
+
+    Utils.info("Initializing HealthManager...")
+
+    -- Verify health property is configured
+    if not Config.HEALTH_PROPERTY_PATH then
+        Utils.warn("HEALTH_PROPERTY_PATH not configured — health operations will fail")
+    else
+        Utils.info("Health property path: " .. M._get_health_path())
+    end
+
+    if Config.HEALTH_IS_ATTRIBUTE_DATA then
+        Utils.info("Health is stored as FGameplayAttributeData")
+    end
+
+    -- Register EventBus listeners
+    -- (Currently health manager doesn't need to listen to other events,
+    -- but this is here for future extensibility)
+
+    M._initialized = true
+    Utils.info("HealthManager initialized")
+
+    -- Register self-tests
+    M._register_self_tests()
+end
+
+--- Reset the health manager state (for testing or reinitialization).
+function M.reset()
+    M._current_tick = 0
+    M._pending_writes = {}
+    M._death_queue = {}
+    M._revive_queue = {}
+    M._player_cache = {}
+    M._initialized = false
+
+    -- Unsubscribe from events
+    for _, sub_id in pairs(M._subscriptions) do
+        -- EventBus.off is not called here as we don't track all subscriptions
+    end
+    M._subscriptions = {}
+
+    Utils.info("HealthManager reset")
+end
+
+-- ===========================================================================
+-- Self-Tests
+-- ===========================================================================
+
+--- Register self-tests for the health manager.
+function M._register_self_tests()
+    -- Test: get_health on nil returns nil
+    Utils.register_test("health_manager_get_health_nil", function()
+        return M.get_health(nil) == nil
+    end)
+
+    -- Test: apply_damage on nil returns false
+    Utils.register_test("health_manager_apply_damage_nil", function()
+        local ok, err = M.apply_damage(nil, 10, nil)
+        return ok == false and err == "player is nil"
+    end)
+
+    -- Test: set_health on nil returns false
+    Utils.register_test("health_manager_set_health_nil", function()
+        return M.set_health(nil, 50) == false
+    end)
+
+    -- Test: is_dead on nil returns true
+    Utils.register_test("health_manager_is_dead_nil", function()
+        return M.is_dead(nil) == true
+    end)
+
+    -- Test: get_status returns valid structure
+    Utils.register_test("health_manager_get_status", function()
+        local status = M.get_status()
+        return type(status) == "table"
+            and status.current_tick ~= nil
+            and status.pending_writes ~= nil
+    end)
+
+    -- Test: health path resolution with attribute data
+    Utils.register_test("health_path_attribute_data", function()
+        -- Temporarily override config
+        local original = Config.HEALTH_IS_ATTRIBUTE_DATA
+        Config.HEALTH_IS_ATTRIBUTE_DATA = true
+        Config.HEALTH_PROPERTY_PATH = "Health"
+
+        local path = M._get_health_path()
+        local result = path == "Health.CurrentValue"
+
+        Config.HEALTH_IS_ATTRIBUTE_DATA = original
+        return result
+    end)
+
+    -- Test: health path resolution without attribute data
+    Utils.register_test("health_path_direct", function()
+        local original = Config.HEALTH_IS_ATTRIBUTE_DATA
+        Config.HEALTH_IS_ATTRIBUTE_DATA = false
+        Config.HEALTH_PROPERTY_PATH = "Health"
+
+        local path = M._get_health_path()
+        local result = path == "Health"
+
+        Config.HEALTH_IS_ATTRIBUTE_DATA = original
+        return result
+    end)
+
+    -- Test: clamp helper works correctly
+    Utils.register_test("health_clamp", function()
+        return Utils.clamp(5, 0, 10) == 5
+            and Utils.clamp(-1, 0, 10) == 0
+            and Utils.clamp(15, 0, 10) == 10
+    end)
+end)
+
+-- ===========================================================================
+-- SECTION: Cleanup / Destroy
+-- ===========================================================================
+-- Clears all pending writes, death queue, revive queue, and player cache.
+-- Called by main_phase1.shutdown() in reverse init order.
+function M.destroy()
+    Utils.info("Destroying Health Manager...")
+
+    -- Clear pending writes
+    M._pending_writes = {}
+    Utils.info("  Cleared pending writes")
+
+    -- Clear death queue
+    M._death_queue = {}
+    Utils.info("  Cleared death queue")
+
+    -- Clear revive queue
+    M._revive_queue = {}
+    Utils.info("  Cleared revive queue")
+
+    -- Clear player cache
+    M._player_cache = {}
+    Utils.info("  Cleared player cache")
+
+    -- Reset state
+    M._current_tick = 0
+    M._initialized = false
+    Utils.info("  Reset state")
+
+    Utils.info("Health Manager destroyed")
+end
+
+return M
