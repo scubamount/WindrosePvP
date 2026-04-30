@@ -149,7 +149,7 @@ function M._update_player_cache()
             end
         end
     end
-        end
+    end
 
 
 -- ===========================================================================
@@ -462,7 +462,7 @@ function M.on_tick(dt)
             if not player or not player:IsValid() then
                 -- Player no longer valid, clear pending
                 M._pending_writes[addr] = nil
-                goto continue
+                goto skip_player
             end
 
             local actual = M.get_health(player)
@@ -503,7 +503,7 @@ function M.on_tick(dt)
                 M._pending_writes[addr] = nil
             end
         end
-        ::continue::
+        ::skip_player::
     end
 
     -- =========================================================================

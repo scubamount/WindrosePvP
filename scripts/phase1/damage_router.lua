@@ -745,17 +745,16 @@ function M.destroy()
         invalid_instigator = 0,
         hook_registration_failed = 0,
         messages_sent = 0,
-    }
     Utils.info("  Cleared stats")
 
     -- Reset state
-
-  -- Unsubscribe from EventBus
-  for name, sub_id in pairs(M._subscriptions) do
-    EventBus.off(name, sub_id)
-  end
-  M._subscriptions = {}
     M._initialized = false
+
+    -- Unsubscribe from EventBus
+    for name, sub_id in pairs(M._subscriptions) do
+        EventBus.off(name, sub_id)
+    end
+    M._subscriptions = {}
     Utils.info("  Reset state")
 
     Utils.info("Damage Router destroyed")
