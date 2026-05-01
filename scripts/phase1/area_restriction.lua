@@ -12,6 +12,12 @@ local PvPStateManager = require("scripts.phase1.pvp_state_manager")
 
 local M = {}
 
+--- @class AreaRestriction
+--- @field _arena_center {X: number, Y: number, Z: number} Arena center coordinates
+--- @field _arena_radius number Arena radius in world units
+--- @field _monitoring_active boolean Whether monitoring is active
+--- @field _test_results table|nil Self-test results
+
 -- ===========================================================================
 -- Constants
 -- ===========================================================================
