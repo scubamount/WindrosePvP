@@ -26,11 +26,25 @@ M._LOCATION_PATHS = {
 
 --- WindrosePlus global (may not be available).
 --- Provides teleportation API if present.
-local wp = nil
-if _G.wp ~= nil then
-    wp = _G.wp
-elseif _G.WindrosePlus ~= nil then
-    wp = _G.WindrosePlus
+--- Lazy resolver for WindrosePlus API global.
+--- Resolves at call-time so it works even if WP initializes after this module loads.
+local function get_wp()
+    if _G.wp then return _G.wp end
+    if _G.WindrosePlus then return _G.WindrosePlus end
+    return nil
+end
+
+-- ===========================================================================
+-- Player Validity Helper
+-- ===========================================================================
+
+--- Check if a player UObject is still valid (pcall-wrapped for GC safety).
+--- @param player userdata|nil
+--- @return boolean
+local function is_player_valid(player)
+    if not player then return false end
+    local ok, valid = pcall(function() return player:IsValid() end)
+    return ok and valid == true
 end
 
 -- ===========================================================================
@@ -122,11 +136,12 @@ end
 --- @param player userdata The player UObject to teleport
 --- @return boolean True if teleport succeeded
 function M._teleport_to_arena(player)
-    if not player or not player:IsValid() then
-        return false
-    end
+  if not is_player_valid(player) then
+    return false
+  end
 
-    local center = M._arena_center
+  local center = M._arena_center
+    local wp = get_wp()
 
     -- Try WindrosePlus API first
     if wp and wp.teleport_player then

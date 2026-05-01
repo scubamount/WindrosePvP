@@ -1,0 +1,27 @@
+# Lua bytecode
+*.luac
+
+# Backup files
+*.bak
+
+# Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# UE4SS cache
+*.bin
+
+# Build artifacts
+*.pak
+*.ucas
+*.utoc
+
+# Logs
+*.log

@@ -7,6 +7,45 @@ local Config = require("scripts.config")
 local Utils = require("scripts.utils")
 local EventBus = require("scripts.event_bus")
 
+-- ===========================================================================
+-- EmmyLua Type Definitions
+-- ===========================================================================
+
+--- @class Challenge
+--- @field id number Challenge ID
+--- @field challenger userdata Challenger UObject
+--- @field target userdata Target UObject
+--- @field challenger_name string
+--- @field target_name string
+--- @field created_at number Timestamp when created
+--- @field expires_at number Expiration timestamp
+--- @field status string "pending"|"accepted"|"declined"|"expired"|"cancelled"
+
+--- @class Duel
+--- @field id number Duel ID
+--- @field player_a userdata First player UObject
+--- @field player_b userdata Second player UObject
+--- @field player_a_name string
+--- @field player_b_name string
+--- @field started_at number Timestamp when started
+--- @field max_duration number Maximum duration in seconds
+--- @field status string "pending"|"active"|"ended"
+--- @field end_reason string|nil "death"|"surrender"|"timeout"|"disconnect"|"admin_cancel"
+--- @field winner userdata|nil Winner UObject
+--- @field loser userdata|nil Loser UObject
+--- @field ended_at number|nil Timestamp when ended
+--- @field arena_center table|nil Arena center coordinates
+
+--- @class PvPStateManager
+--- @field _challenges table<number, Challenge> Active challenges by ID
+--- @field _duels table<number, Duel> Active duels by ID
+--- @field _next_challenge_id number Auto-incrementing challenge ID
+--- @field _next_duel_id number Auto-incrementing duel ID
+--- @field _player_challenge table<string, number> Player address → challenge ID
+--- @field _player_duel table<string, number> Player address → duel ID
+--- @field _challenge_id_to_player table<number, string> Challenge ID → player address
+--- @field _duel_id_to_player table<number, string> Duel ID → player address
+
 local M = {}
 
 -- ===========================================================================
@@ -90,7 +129,8 @@ end
 --- Create a new duel challenge from challenger to target.
 --- @param challenger userdata The player issuing the challenge
 --- @param target userdata The player being challenged
---- @return number|nil challenge_id, string|nil error_string
+--- @return number|nil challenge_id ID of created challenge, or nil on error
+--- @return string|nil error_string Error message if failed, nil on success
 function M.create_challenge(challenger, target)
     -- Validate inputs
     if not challenger or not target then
@@ -174,8 +214,9 @@ function M.create_challenge(challenger, target)
 end
 
 --- Accept a pending challenge.
---- @param challenge_id number
---- @return boolean success, string|nil error
+--- @param challenge_id number ID of the challenge to accept
+--- @return boolean success True if accepted successfully
+--- @return string|nil error Error message if failed, nil on success
 function M.accept_challenge(challenge_id)
     local challenge = M._challenges[challenge_id]
     if not challenge then
@@ -230,8 +271,9 @@ function M.accept_challenge(challenge_id)
 end
 
 --- Decline a pending challenge.
---- @param challenge_id number
---- @return boolean success, string|nil error
+--- @param challenge_id number ID of the challenge to decline
+--- @return boolean success True if declined successfully
+--- @return string|nil error Error message if failed, nil on success
 function M.decline_challenge(challenge_id)
     local challenge = M._challenges[challenge_id]
     if not challenge then
@@ -444,11 +486,11 @@ function M.start_duel(duel_id)
 end
 
 --- End a duel with a winner and loser.
---- @param duel_id number
+--- @param duel_id number ID of the duel to end
 --- @param winner userdata|nil The winning player (nil for draws/cancel)
 --- @param loser userdata|nil The losing player (nil for draws/cancel)
---- @param reason string "death" | "surrender" | "timeout" | "disconnect" | "admin_cancel"
---- @return boolean success
+--- @param reason string "death"|"surrender"|"timeout"|"disconnect"|"admin_cancel"
+--- @return boolean success True if ended successfully
 function M.end_duel(duel_id, winner, loser, reason)
     local duel = M._duels[duel_id]
     if not duel then
@@ -527,8 +569,8 @@ function M.is_dueling(player)
 end
 
 --- Get the duel a player is currently in.
---- @param player userdata
---- @return table|nil Duel object
+--- @param player userdata The player to look up
+--- @return Duel|nil Duel object if player is in a duel, nil otherwise
 function M.get_duel(player)
     local addr = get_player_address(player)
     if not addr then return nil end
@@ -556,8 +598,8 @@ function M.get_opponent(player)
 end
 
 --- Get a duel by its ID.
---- @param duel_id number
---- @return table|nil Duel object
+--- @param duel_id number The duel ID to look up
+--- @return Duel|nil Duel object if found, nil otherwise
 function M.get_duel_by_id(duel_id)
     return M._duels[duel_id]
 end
@@ -609,8 +651,7 @@ function M.on_tick(dt)
             local player_b_valid = is_player_valid(duel.player_b)
 
             if not player_a_valid or not player_b_valid then
-                local disconnect_reason = not player_a_valid and not player_b_valid
-                    and "disconnect" or (not player_a_valid and "disconnect" or "disconnect")
+                local disconnect_reason = "disconnect"
 
                 Utils.info(string.format("Duel %d ended due to disconnect", duel_id))
                 M.end_duel(duel_id, nil, nil, "disconnect")

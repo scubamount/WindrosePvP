@@ -1,0 +1,73 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/lua-language-server/main/schema/config.json",
+  "runtime": {
+    "version": "Lua 5.3",
+    "path": ["scripts/?.lua", "scripts/?/init.lua", "?.lua", "?/init.lua"],
+    "pathStrict": false
+  },
+  "diagnostics": {
+    "enable": true,
+    "severity": {
+      "undefined-global": "warning",
+      "undefined-field": "hint",
+      "deprecated": "warning",
+      "duplicate-set-field": "warning",
+      "duplicate-set-local": "warning"
+    },
+    "globals": [
+      "FindFirstOf",
+      "FindAllOf",
+      "NotifyOnNewObject",
+      "RegisterHook",
+      "RegisterConsoleCommandHandler",
+      "UnregisterConsoleCommandHandler",
+      "HookProcessConsoleExec",
+      "pcall",
+      "print",
+      "tostring",
+      "tonumber",
+      "type",
+      "pairs",
+      "ipairs",
+      "next",
+      "require",
+      "os",
+      "math",
+      "string",
+      "table",
+      "setmetatable",
+      "getmetatable",
+      "unpack",
+      "select",
+      "error",
+      "assert",
+      "rawget",
+      "rawset",
+      "rawequal",
+      "rawlen",
+      "_G",
+      "_VERSION"
+    ],
+    "disable": [
+      "lowercase-global",
+      "undefined-doc-param"
+    ]
+  },
+  "workspace": {
+    "library": [],
+    "checkThirdParty": false,
+    "ignoreDir": [".git"]
+  },
+  "type": {
+    "castNumberToInteger": true
+  },
+  "format": {
+    "enable": false
+  },
+  "hint": {
+    "enable": true,
+    "setType": false,
+    "paramType": true,
+    "awaitType": false
+  }
+}

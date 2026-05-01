@@ -14,12 +14,32 @@
 --- @require EventBus - Internal pub/sub for events
 --- @require PvPStateManager - PvP duel state management
 
+--- @class HealthManager
+--- @field _current_tick number Current tick counter
+--- @field _pending_writes table<string, {expected: number, tick_written: number, retries: number}> Pending health writes
+--- @field _player_cache table<string, {player: userdata, last_known_health: number|nil, last_known_max: number|nil}> Player cache
+--- @field _damage_messages_active boolean Whether damage messages are enabled
+--- @field _test_results table|nil Self-test results
+
 local Config = require("scripts.config")
 local Utils = require("scripts.utils")
 local EventBus = require("scripts.event_bus")
 local PvPStateManager = require("scripts.phase1.pvp_state_manager")
 
 local M = {}
+
+-- ===========================================================================
+-- Player Validity Helper
+-- ===========================================================================
+
+--- Check if a player UObject is still valid (pcall-wrapped for GC safety).
+--- @param player userdata|nil
+--- @return boolean
+local function is_player_valid(player)
+    if not player then return false end
+    local ok, valid = pcall(function() return player:IsValid() end)
+    return ok and valid == true
+end
 
 -- ===========================================================================
 -- Private State
@@ -92,7 +112,7 @@ end
 --- @param player userdata Player UObject
 --- @return table|nil Cache entry, or nil if player invalid
 function M._get_cache_entry(player)
-    if not player or not player:IsValid() then
+    if not is_player_valid(player) then
         return nil
     end
 
@@ -120,7 +140,7 @@ end
 --- @return userdata|nil Player UObject, or nil if not found
 function M._get_player_by_addr(addr)
     local entry = M._player_cache[addr]
-    if entry and entry.player and entry.player:IsValid() then
+    if entry and is_player_valid(entry.player) then
         return entry.player
     end
     return nil
@@ -128,13 +148,14 @@ end
 
 --- Update cached health values for all known players.
 --- Called periodically from OnTick.
+--- @return nil
 function M._update_player_cache()
     -- Get all dueling players from PvPStateManager
     local duels = PvPStateManager and PvPStateManager.get_active_duels and PvPStateManager.get_active_duels() or {}
 
     for _, duel in ipairs(duels) do
         -- Update player_a health cache (use correct field names: player_a, player_b)
-        if duel and duel.player_a and duel.player_a:IsValid() then
+        if duel and is_player_valid(duel.player_a) then
             local addr_a = Utils.obj_address(duel.player_a)
             if addr_a then
                 M._player_cache[addr_a] = { player = duel.player_a, last_known_health = M.get_health(duel.player_a) or 100 }
@@ -142,7 +163,7 @@ function M._update_player_cache()
         end
 
         -- Update player_b health cache
-        if duel and duel.player_b and duel.player_b:IsValid() then
+        if duel and is_player_valid(duel.player_b) then
             local addr_b = Utils.obj_address(duel.player_b)
             if addr_b then
                 M._player_cache[addr_b] = { player = duel.player_b, last_known_health = M.get_health(duel.player_b) or 100 }
@@ -256,7 +277,7 @@ function M.apply_damage(player, amount, source)
         return false, "player is nil"
     end
 
-    if not player:IsValid() then
+    if not is_player_valid(player) then
         return false, "player is not valid"
     end
 
@@ -347,9 +368,9 @@ end
 --- Heal a player by a specified amount.
 --- @param player userdata|nil Target player
 --- @param amount number Amount to heal
---- @return boolean Whether the heal succeeded
+--- @return boolean, string|nil Success status, optional error message
 function M.heal_player(player, amount)
-    if not player or not player:IsValid() then
+    if not is_player_valid(player) then
         return false
     end
 
@@ -376,7 +397,7 @@ function M.is_dead(player)
         return true
     end
 
-    if not player:IsValid() then
+    if not is_player_valid(player) then
         return true
     end
 
@@ -399,6 +420,7 @@ end
 --- @param target userdata|nil Target
 --- @param damage number Damage amount
 --- @param remaining number Remaining health
+--- @return nil
 function M._send_damage_message(source, target, damage, remaining)
     local source_name = source and Utils.player_id(source) or "Unknown"
     local target_name = target and Utils.player_id(target) or "Unknown"
@@ -440,6 +462,7 @@ end
 --- 4. Player cache updates
 ---
 --- @param dt number Delta time in seconds
+--- @return nil
 function M.on_tick(dt)
     if not M._initialized then
         return
@@ -459,8 +482,8 @@ function M.on_tick(dt)
         -- Only check after configured delay
         if M._current_tick - pending.tick_written >= Config.HEALTH_REAPPLY_CHECK_DELAY then
             local player = M._get_player_by_addr(addr)
-            if not player or not player:IsValid() then
-                -- Player no longer valid, clear pending
+		if not is_player_valid(player) then
+			-- Player no longer valid, clear pending
                 M._pending_writes[addr] = nil
                 goto skip_player
             end
@@ -609,7 +632,7 @@ end
 --- @param player userdata Player to query
 --- @return table|nil Detailed health info
 function M.get_player_health_info(player)
-    if not player or not player:IsValid() then
+	if not is_player_valid(player) then
         return nil
     end
 
@@ -635,6 +658,7 @@ end
 
 --- Initialize the health manager.
 --- Registers EventBus listeners and sets up internal state.
+--- @return nil
 function M.init()
     if M._initialized then
         Utils.warn("HealthManager.init called but already initialized")
@@ -666,6 +690,7 @@ function M.init()
 end
 
 --- Reset the health manager state (for testing or reinitialization).
+--- @return nil
 function M.reset()
     M._current_tick = 0
     M._pending_writes = {}
@@ -688,6 +713,7 @@ end
 -- ===========================================================================
 
 --- Register self-tests for the health manager.
+--- @return nil
 function M._register_self_tests()
     -- Test: get_health on nil returns nil
     Utils.register_test("health_manager_get_health_nil", function()
@@ -758,6 +784,7 @@ end
 -- ===========================================================================
 -- Clears all pending writes, death queue, revive queue, and player cache.
 -- Called by main_phase1.shutdown() in reverse init order.
+--- @return nil
 function M.destroy()
     Utils.info("Destroying Health Manager...")
 

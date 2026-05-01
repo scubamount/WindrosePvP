@@ -2,6 +2,28 @@
 --- All PvP mod settings, feature flags, and tunable constants.
 --- This module is the single source of truth for all config values.
 
+--- @class Config
+--- @field MOD_NAME string Mod name
+--- @field MOD_VERSION string Mod version
+--- @field ARENA_CENTER {X: number, Y: number, Z: number} Arena center
+--- @field ARENA_RADIUS number Arena radius
+--- @field DUEL_MAX_DURATION number Max duel seconds
+--- @field DUEL_CHALLENGE_TIMEOUT number Challenge expiry seconds
+--- @field HEALTH_PROPERTY_PATH string|nil Health property path
+--- @field MAX_HEALTH_PROPERTY_NAME string|nil Max health property name
+--- @field HEALTH_IS_ATTRIBUTE_DATA boolean Whether health uses FGameplayAttributeData
+--- @field MAX_CONCURRENT_DUELS number Max concurrent duels
+--- @field MIN_HEALTH_TO_DUEL number Min health to start
+--- @field MAX_DAMAGE_PER_HIT number Max damage per hit
+--- @field HEALTH_REAPPLY_CHECK_DELAY number Ticks before re-apply check
+--- @field HEALTH_REAPPLY_MAX_RETRIES number Max re-apply retries
+--- @field AUTO_REVIVE_LOSER boolean Auto-revive toggle
+--- @field AUTO_REVIVE_DELAY number Revive delay seconds
+--- @field DAMAGE_MESSAGES_ENABLED boolean Damage messages toggle
+--- @field MELEE_HOOK_WORKS boolean Melee hooks working
+--- @field GAS_HOOK_WORKS boolean GAS hooks working
+--- @field DEBUG_LOGGING boolean Debug logging toggle
+
 local Config = {}
 
 -- ===========================================================================
@@ -206,6 +228,8 @@ Config.HOOK_PATHS = {
 -- ===========================================================================
 
 --- Deep-copy a table (for config overrides)
+--- @param obj table
+--- @return table
 function Config.deepcopy(orig)
     local copy
     if type(orig) == "table" then
@@ -222,6 +246,9 @@ end
 
 --- Override config values from a table (for runtime RCON config)
 --- Only overrides keys that already exist in Config (no new keys)
+--- @param key string
+--- @param value string|number|boolean
+--- @return boolean, string|nil
 function Config.apply_overrides(overrides)
     if type(overrides) ~= "table" then return end
     for key, value in pairs(overrides) do
@@ -235,6 +262,7 @@ function Config.apply_overrides(overrides)
 end
 
 --- Get a config value by dot-separated path (e.g., "ARENA_CENTER.X")
+--- @return table
 function Config.get(path)
     local current = Config
     for part in path:gmatch("[^.]+") do

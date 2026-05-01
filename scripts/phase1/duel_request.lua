@@ -24,6 +24,13 @@ local Utils = require("scripts.utils")
 local EventBus = require("scripts.event_bus")
 local PvPStateManager = require("scripts.phase1.pvp_state_manager")
 
+--- @class DuelRequest
+--- @field _commands_registered boolean Whether RCON commands are registered
+--- @field _wp_available boolean Whether WindrosePlus API is available
+--- @field _subscriptions table EventBus subscription IDs
+--- @field _player_name_cache table<string, userdata> Name→UObject cache
+--- @field _test_results table|nil Self-test results
+
 -- HealthManager may not be loaded yet - handle gracefully
 local HealthManager = nil
 local function get_health_manager()
@@ -36,6 +43,19 @@ local function get_health_manager()
 end
 
 local M = {}
+
+-- ===========================================================================
+-- Player Validity Helper
+-- ===========================================================================
+
+--- Check if a player UObject is still valid (pcall-wrapped for GC safety).
+--- @param player userdata|nil
+--- @return boolean
+local function is_player_valid(player)
+    if not player then return false end
+    local ok, valid = pcall(function() return player:IsValid() end)
+    return ok and valid == true
+end
 
 -- ===========================================================================
 -- Private State
@@ -64,11 +84,11 @@ end
 
 --- Update cache with current online players
 function M._update_cache()
-    local all_players = Utils.find_all_of(Config.CLASS_NAMES.PLAYER_CHARACTER)
-    if not all_players then return end
+	local all_players = Utils.find_all_of(Config.CLASS_NAMES.PLAYER_CHARACTER)
+	if not all_players then return end
 
-    for _, player in pairs(all_players) do
-        if player and player:IsValid() then
+	for _, player in pairs(all_players) do
+		if is_player_valid(player) then
             local name = Utils.player_id(player)
             if name and name ~= "<nil>" and name ~= "<unknown>" then
                 M._player_name_cache[name:lower()] = player
@@ -89,16 +109,16 @@ function M.find_player_by_name(name)
 
     -- Case-insensitive lookup
     local player = M._player_name_cache[name:lower()]
-    if player and player:IsValid() then
-        return player
-    end
+	if is_player_valid(player) then
+		return player
+	end
 
-    -- Fallback: scan all players directly
-    local all_players = Utils.find_all_of(Config.CLASS_NAMES.PLAYER_CHARACTER)
-    if not all_players then return nil end
+	-- Fallback: scan all players directly
+	local all_players = Utils.find_all_of(Config.CLASS_NAMES.PLAYER_CHARACTER)
+	if not all_players then return nil end
 
-    for _, player in pairs(all_players) do
-        if player and player:IsValid() then
+	for _, player in pairs(all_players) do
+		if is_player_valid(player) then
             local player_name = Utils.player_id(player)
             if player_name and player_name:lower() == name:lower() then
                 return player
@@ -110,19 +130,19 @@ function M.find_player_by_name(name)
 end
 
 --- Get all online player names.
---- @return table List of player name strings
+--- @return string[] List of player name strings
 function M.get_online_players()
     local names = {}
     local all_players = Utils.find_all_of(Config.CLASS_NAMES.PLAYER_CHARACTER)
 
     if not all_players then return names end
 
-    for _, player in pairs(all_players) do
-        if player and player:IsValid() then
-            local name = Utils.player_id(player)
-            if name and name ~= "<nil>" and name ~= "<unknown>" then
-                names[#names + 1] = name
-            end
+	for _, player in pairs(all_players) do
+		if is_player_valid(player) then
+			local name = Utils.player_id(player)
+			if name and name ~= "<nil>" and name ~= "<unknown>" then
+				names[#names + 1] = name
+			end
         end
     end
 
@@ -175,6 +195,8 @@ end
 
 --- pvp_challenge <your_name> <target_name>
 --- Challenge a player to a duel.
+--- @param args string[]
+--- @return string
 function M.cmd_challenge(args)
     if #args < 2 then
         return "Usage: pvp_challenge <your_name> <target_name>\n" ..
@@ -200,14 +222,14 @@ function M.cmd_challenge(args)
         return "Error: Target player '" .. target_name .. "' not found online"
     end
 
-    -- Ensure both players are valid
-    if not challenger:IsValid() then
-        return "Error: Your player object is no longer valid"
-    end
+-- Ensure both players are valid
+	if not is_player_valid(challenger) then
+		return "Error: Your player object is no longer valid"
+	end
 
-    if not target:IsValid() then
-        return "Error: Target player object is no longer valid"
-    end
+	if not is_player_valid(target) then
+		return "Error: Target player object is no longer valid"
+	end
 
     -- Validate using PvPStateManager
     local challenge_id, err = PvPStateManager.create_challenge(challenger, target)
@@ -220,7 +242,7 @@ function M.cmd_challenge(args)
         challenger = your_name,
         target = target_name,
     })
-    M.send_system_message(challenge.target, msg)
+    M.send_system_message(target, msg)
 
     Utils.info("Challenge created: " .. your_name .. " → " .. target_name .. " (ID: " .. challenge_id .. ")")
 
@@ -230,6 +252,8 @@ end
 
 --- pvp_accept <your_name>
 --- Accept a pending challenge.
+--- @param args string[]
+--- @return string
 function M.cmd_accept(args)
     if #args < 1 then
         return "Usage: pvp_accept <your_name>\n" ..
@@ -278,6 +302,8 @@ end
 
 --- pvp_decline <your_name>
 --- Decline a pending challenge.
+--- @param args string[]
+--- @return string
 function M.cmd_decline(args)
     if #args < 1 then
         return "Usage: pvp_decline <your_name>\n" ..
@@ -321,6 +347,8 @@ end
 
 --- pvp_surrender <your_name>
 --- Surrender from current duel.
+--- @param args string[]
+--- @return string
 function M.cmd_surrender(args)
     if #args < 1 then
         return "Usage: pvp_surrender <your_name>\n" ..
@@ -373,6 +401,8 @@ end
 
 --- pvp_status
 --- Show current PvP status.
+--- @param args string[]
+--- @return string
 function M.cmd_status(args)
     local status = PvPStateManager.get_status()
 
@@ -415,6 +445,8 @@ end
 
 --- pvp_health [player_name]
 --- Show health of player(s).
+--- @param args string[]
+--- @return string
 function M.cmd_health(args)
     local hm = get_health_manager()
 
@@ -428,10 +460,10 @@ function M.cmd_health(args)
         local lines = {}
         lines[#lines + 1] = "=== Duelling Players Health ==="
 
-        for _, duel in ipairs(duels) do
-            for _, player_ref in ipairs({"player_a", "player_b"}) do
-                local player = duel[player_ref]
-                if player and player:IsValid() then
+	for _, duel in ipairs(duels) do
+		for _, player_ref in ipairs({"player_a", "player_b"}) do
+			local player = duel[player_ref]
+			if is_player_valid(player) then
                     local name = Utils.player_id(player)
                     local health = nil
 
@@ -480,6 +512,8 @@ end
 
 --- pvp_duels
 --- List all active duels.
+--- @param args string[]
+--- @return string
 function M.cmd_duels(args)
     local status = PvPStateManager.get_status()
 
@@ -506,6 +540,8 @@ end
 
 --- pvp_cancel <duel_id>
 --- Admin: cancel a specific duel.
+--- @param args string[]
+--- @return string
 function M.cmd_cancel(args)
     if #args < 1 then
         return "Usage: pvp_cancel <duel_id>\n" ..
@@ -537,6 +573,8 @@ end
 
 --- pvp_test
 --- Run all self-tests.
+--- @param args string[]
+--- @return string
 function M.cmd_test(args)
     local lines = {}
     lines[#lines + 1] = "=== WindrosePvP Self-Tests ==="
@@ -572,6 +610,8 @@ end
 
 --- pvp_config [key] [value]
 --- View or modify config values.
+--- @param args string[]
+--- @return string
 function M.cmd_config(args)
     if #args < 1 then
         -- Return all config values
@@ -813,7 +853,8 @@ end
 -- Self-Tests
 -- ===========================================================================
 
-function M.run_self_tests()
+--- @return number, number passed, failed
+function M.run_self_tests(), failed
     local passed = 0
     local failed = 0
 
@@ -910,6 +951,7 @@ end
 -- Module Initialization
 -- ===========================================================================
 
+--- @return boolean
 function M.init()
     Utils.info("Initializing Duel Request System...")
 

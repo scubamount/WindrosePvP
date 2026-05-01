@@ -1,6 +1,9 @@
 --- WindrosePvP Utility Functions
 --- Safe property access, logging, hook wrappers, and self-test harness.
 
+--- @class Utils
+--- Utilities for safe property access, logging, UE4SS API wrappers
+
 local Utils = {}
 
 -- ===========================================================================
@@ -27,9 +30,16 @@ function Utils.log(level, message)
     end
 end
 
+--- @param msg string
 function Utils.error(message) Utils.log(1, message) end
+
+--- @param msg string
 function Utils.warn(message) Utils.log(2, message) end
+
+--- @param msg string
 function Utils.info(message) Utils.log(3, message) end
+
+--- @param msg string
 function Utils.debug(message) Utils.log(4, message) end
 
 -- ===========================================================================
@@ -40,6 +50,9 @@ function Utils.debug(message) Utils.log(4, message) end
 --- @param obj userdata|nil The UObject to read from
 --- @param prop_path string Dot-separated property path (e.g., "Health" or "AbilitySystemComponent.AttributeSet.Health")
 --- @return any|nil The property value, or nil on any failure
+--- @param obj userdata
+--- @param path string
+--- @return any
 function Utils.safe_read(obj, prop_path)
     if not obj then return nil end
     if type(obj) ~= "userdata" then return nil end
@@ -69,6 +82,10 @@ end
 --- @param prop_path string Dot-separated property path
 --- @param value any The value to write
 --- @return boolean Whether the write succeeded
+--- @param obj userdata
+--- @param path string
+--- @param value any
+--- @return boolean
 function Utils.safe_write(obj, prop_path, value)
     if not obj then return false end
     if type(obj) ~= "userdata" then return false end
@@ -120,6 +137,8 @@ end
 --- Safely find the first instance of a class.
 --- @param class_name string The UE class name (e.g., "R5PlayerCharacter")
 --- @return userdata|nil The first found object, or nil
+--- @param class string
+--- @return userdata|nil
 function Utils.find_first_of(class_name)
     local ok, result = pcall(function()
         return FindFirstOf(class_name)
@@ -137,6 +156,8 @@ end
 --- Safely find all instances of a class.
 --- @param class_name string The UE class name
 --- @return table|nil List of found objects, or nil on failure
+--- @param class string
+--- @return table|nil
 function Utils.find_all_of(class_name)
     local ok, result = pcall(function()
         return FindAllOf(class_name)
@@ -177,6 +198,9 @@ end
 --- @param pre_fn function|nil Pre-hook callback (self, params...) → nil|false
 --- @param post_fn function|nil Post-hook callback (self, params..., retval)
 --- @return boolean Whether hook registration succeeded
+--- @param path string
+--- @param callback function
+--- @return boolean
 function Utils.safe_hook(hook_path, pre_fn, post_fn)
     local wrapped_pre = nil
     if pre_fn then
@@ -261,6 +285,9 @@ end
 --- @param template string Template with {key} placeholders
 --- @param data table Key-value pairs to substitute
 --- @return string Formatted string
+--- @param template string
+--- @param data table
+--- @return string
 function Utils.format_template(template, data)
     return template:gsub("{(%w+)}", function(key)
         return tostring(data[key] or "{" .. key .. "}")
@@ -271,6 +298,8 @@ end
 --- Tries common name properties, falls back to address.
 --- @param player userdata Player UObject
 --- @return string Player identifier
+--- @param obj userdata
+--- @return string|nil
 function Utils.player_id(player)
     if not player then return "<nil>" end
     
@@ -331,6 +360,8 @@ end
 --- Get the address of a UObject for use as a table key.
 --- @param obj userdata
 --- @return string|nil Address string
+--- @param obj userdata
+--- @return string|nil
 function Utils.obj_address(obj)
     if not obj then return nil end
     local ok, addr = pcall(function()
@@ -348,6 +379,9 @@ Utils._tests = {}
 --- Register a self-test function.
 --- @param name string Test name
 --- @param fn function Test function (should return true on success)
+--- @param name string
+--- @param fn function
+--- @return boolean
 function Utils.register_test(name, fn)
     Utils._tests[name] = fn
 end

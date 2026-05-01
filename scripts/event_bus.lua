@@ -2,6 +2,15 @@
 --- Internal pub/sub system for inter-module communication.
 --- Errors in one handler do not block other handlers.
 
+--- @class EventBus
+--- @field _handlers table<string, {id: number, fn: function}[]> Event handler registry
+--- @field _next_id number Auto-incrementing handler ID
+--- @field _event_log table Ring buffer of recent events
+--- @field _event_log_max number Max ring buffer size
+--- @field _event_log_index number Current ring buffer index
+--- @field _tests_registered boolean Whether test handlers are registered
+--- @field _test_results table|nil Self-test results
+
 local EventBus = {}
 
 -- ===========================================================================
@@ -13,6 +22,7 @@ EventBus._next_id = 1
 EventBus._event_log = {}  -- Ring buffer of recent events (for debugging)
 EventBus._event_log_max = 100
 EventBus._event_log_index = 0
+EventBus._tests_registered = false
 
 -- ===========================================================================
 -- Public API
@@ -22,6 +32,9 @@ EventBus._event_log_index = 0
 --- @param event_name string The event to listen for
 --- @param handler_fn function Callback receiving the event data
 --- @return number Subscription ID (for unsubscribing)
+--- @param event string
+--- @param callback function
+--- @return number
 function EventBus.on(event_name, handler_fn)
     if type(event_name) ~= "string" or type(handler_fn) ~= "function" then
         return -1
@@ -40,6 +53,9 @@ end
 --- @param event_name string The event name
 --- @param handler_id number The subscription ID returned by on()
 --- @return boolean Whether the handler was found and removed
+--- @param event string
+--- @param id number
+--- @return boolean
 function EventBus.off(event_name, handler_id)
     local list = EventBus._handlers[event_name]
     if not list then return false end
@@ -57,6 +73,8 @@ end
 --- Each handler runs in isolation — errors in one handler do not affect others.
 --- @param event_name string The event name
 --- @param data any Event data (typically a table)
+--- @param event string
+--- @param data any
 function EventBus.emit(event_name, data)
     local list = EventBus._handlers[event_name]
 
@@ -89,6 +107,9 @@ end
 --- @param event_name string The event to listen for
 --- @param handler_fn function Callback
 --- @return number Subscription ID
+--- @param event string
+--- @param callback function
+--- @return number
 function EventBus.once(event_name, handler_fn)
     local id
     local wrapper = function(data)
@@ -101,6 +122,7 @@ end
 
 --- Remove all handlers for a specific event.
 --- @param event_name string
+--- @param event string|nil
 function EventBus.clear(event_name)
     EventBus._handlers[event_name] = nil
 end
@@ -124,6 +146,7 @@ end
 
 --- Get all event names that have at least one handler.
 --- @return table List of event name strings
+--- @return string[]
 function EventBus.active_events()
     local events = {}
     for name, handlers in pairs(EventBus._handlers) do
@@ -162,6 +185,11 @@ end
 
 -- Delayed registration since Utils may not be loaded yet
 local function register_tests()
+    if EventBus._tests_registered then
+        return 0, 0
+    end
+    EventBus._tests_registered = true
+
     -- Basic emit/receive
     EventBus._test_results = EventBus._test_results or {}
 
@@ -243,6 +271,7 @@ end
 
 --- Run event bus self-tests.
 --- @return number passed, number failed
+--- @return number, number
 function EventBus.run_self_tests()
     return register_tests()
 end

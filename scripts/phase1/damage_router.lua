@@ -27,6 +27,25 @@ local HealthManager = require("scripts.phase1.health_manager")
 
 local M = {}
 
+--- @class DamageRouter
+--- @field _initialized boolean Whether the module has been initialized
+--- @field _subscriptions table Subscription IDs for EventBus listeners
+--- @field _stats table Routing statistics
+M = {}
+
+-- ===========================================================================
+-- Object Validity Helper
+-- ===========================================================================
+
+--- Check if a UObject is still valid (pcall-wrapped for GC safety).
+--- @param obj userdata|nil
+--- @return boolean
+local function is_valid(obj)
+    if not obj then return false end
+    local ok, valid = pcall(function() return obj:IsValid() end)
+    return ok and valid == true
+end
+
 -- ===========================================================================
 -- Private State
 -- ===========================================================================
@@ -132,7 +151,7 @@ end
 --- Tries multiple property paths to find the damage value.
 ---
 --- @param ... any Hook parameters
---- @return number|nil Damage amount, or nil if not found
+--- @return number Damage amount
 function M.extract_damage_amount(...)
     local args = {...}
 
@@ -350,7 +369,7 @@ function M.pre_gas_hook(self, ...)
         target = self.Owner
     end
 
-    if not target or not target:IsValid() then
+	if not is_valid(target) then
         -- Try extracting from parameters
         target = M.extract_target(...)
     end
@@ -731,6 +750,18 @@ end
 -- ===========================================================================
 -- Clears stats and resets state.
 -- Called by main_phase1.shutdown() in reverse init order.
+
+--- Shutdown the damage router.
+function M.shutdown()
+    return M.destroy()
+end
+
+--- Run self-tests for the damage router.
+--- @return number, number Passed count, failed count
+function M.run_self_tests()
+    return Utils.run_registered_tests("DamageRouter")
+end
+
 function M.destroy()
     Utils.info("Destroying Damage Router...")
 
